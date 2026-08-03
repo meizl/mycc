@@ -21,6 +21,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from tools import TOOLS, TOOL_HANDLERS
+from hooks import trigger_hooks, init_hooks
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -87,6 +88,11 @@ def agent_loop(messages: list):
         messages.append({"role": "assistant", "content": assistant_content})
 
         if stop_reason != "tool_use":
+            # s04: Stop hook — 可注入消息让循环继续
+            force = trigger_hooks("Stop", messages)
+            if force:
+                messages.append({"role": "user", "content": force})
+                continue
             return
 
         # 执行工具
@@ -96,8 +102,22 @@ def agent_loop(messages: list):
                 name = block["name"]
                 args = block["input"]
                 print(f"\n\033[33m> {name}\033[0m", end="")
+
+                # s04: hook 取代硬编码的 check_permission()
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": str(blocked),
+                    })
+                    continue
+
                 handler = TOOL_HANDLERS.get(name)
                 output = handler(**args) if handler else f"Unknown tool: {name}"
+
+                trigger_hooks("PostToolUse", block, output)
+
                 print(str(output)[:200])
                 tool_results.append({
                     "type": "tool_result",
@@ -111,7 +131,8 @@ def agent_loop(messages: list):
 # ── Entry point ──────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Agent Loop — 流式 + 多工具")
+    init_hooks()
+    print("Agent Loop — 流式 + 多工具 + Hooks")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
@@ -122,6 +143,7 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+        trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
         agent_loop(history)
         # 打印模型的最终文本回复
