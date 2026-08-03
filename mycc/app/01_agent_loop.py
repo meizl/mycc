@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""
-s01_agent_loop.py - The Agent Loop
-
-The entire secret of an AI coding agent in one pattern:
-
-    while stop_reason == "tool_use":
-        response = LLM(messages, tools)
-        execute tools
-        append results
-
-    +----------+      +-------+      +---------+
-    |   User   | ---> |  LLM  | ---> |  Tool   |
-    |  prompt  |      |       |      | execute |
-    +----------+      +---+---+      +----+----+
-                          ^               |
-                          |   tool_result |
-                          +---------------+
-                          (loop continues)
-
-This is the core loop: feed tool results back to the model
-until the model decides to stop. Production agents layer
-policy, hooks, and lifecycle controls on top.
-
-Usage:
-    pip install anthropic python-dotenv
-    ANTHROPIC_API_KEY=... python s01_agent_loop/code.py
-"""
-
-# ── 第一章：导入与初始化 ──────────────────────────────
+import json
 import os
 import subprocess
 
@@ -90,36 +62,81 @@ def run_bash(command: str) -> str:
         return f"Error: {e}"
 
 
-# ── The core pattern: a while loop that calls tools until the model stops ──
+# ── The core pattern: streaming agent loop ───────────────────────
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
+        # ── 流式调用 ────────────────────────────────────────────
+        content_blocks = {}    # 所有内容块，key=event.index
+        stop_reason = None
+
+        with client.messages.stream(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
-        )
+        ) as stream:
+            for event in stream:
+                # 一个内容块（文本/tool_use）开始
+                if event.type == "content_block_start":
+                    block = event.content_block
 
-        # Append assistant turn
-        messages.append({"role": "assistant", "content": response.content})
+                    if block.type == "text":
+                        content_blocks[event.index] = {"type": "text", "text": ""}
+                        print("\033[0m", end="")  # 重置颜色
 
-        # If the model didn't call a tool, we're done
-        if response.stop_reason != "tool_use":
+                    elif block.type == "tool_use":
+                        content_blocks[event.index] = {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": "",
+                        }
+
+                # 内容增量：文本或 tool_use 的 input_json_delta
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+
+                    if delta.type == "text_delta":
+                        content_blocks[event.index]["text"] += delta.text
+                        print(delta.text, end="", flush=True)  # 实时打字效果
+
+                    elif delta.type == "input_json_delta":
+                        content_blocks[event.index]["input"] += delta.partial_json
+
+                # 消息级别的 delta（stop_reason, usage 等）
+                elif event.type == "message_delta":
+                    stop_reason = event.delta.stop_reason
+
+        # ── 组装 assistant 消息（按 index 排序保持原始顺序）──────
+        assistant_content = [
+            block for _, block in sorted(content_blocks.items())
+        ]
+
+        # 将 JSON 字符串反序列化为 dict
+        for block in assistant_content:
+            if block["type"] == "tool_use" and isinstance(block["input"], str):
+                block["input"] = json.loads(block["input"])
+
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # ── 如果模型没有调用工具，结束循环 ────────────────────────
+        if stop_reason != "tool_use":
             return
 
-        # Execute each tool call, collect results
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
+        # ── 执行工具调用，收集结果 ────────────────────────────────
+        tool_results = []
+        for block in assistant_content:
+            if block["type"] == "tool_use":
+                cmd = block["input"]["command"]
+                print(f"\n\033[33m$ {cmd}\033[0m")
+                output = run_bash(cmd)
                 print(output[:200])
-                results.append({
+                tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
+                    "tool_use_id": block["id"],
                     "content": output,
                 })
 
-        # Feed tool results back, loop continues
-        messages.append({"role": "user", "content": results})
+        # 将工具结果喂回消息历史，循环继续
+        messages.append({"role": "user", "content": tool_results})
 
 
 # ── Entry point ──────────────────────────────────────────
