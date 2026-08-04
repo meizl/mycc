@@ -32,13 +32,20 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
-SYSTEM = "You are a coding agent. Use tools to solve tasks. Act, don't explain."
+SYSTEM = "You are a coding agent. Before starting any multi-step task, use todo_write to plan your steps. Update status as you go."
 
 
 # ── The core pattern: streaming agent loop ───────────────────────
 
 def agent_loop(messages: list):
+    rounds_since_todo = 0  # s05: nag 计数器
     while True:
+        # s05: 3 轮没更新 todo → 注入提醒
+        if rounds_since_todo >= 3 and messages:
+            messages.append({"role": "user",
+                             "content": "<reminder>Update your todos.</reminder>"})
+            rounds_since_todo = 0
+
         content_blocks = {}
         stop_reason = None
 
@@ -96,6 +103,7 @@ def agent_loop(messages: list):
             return
 
         # 执行工具
+        rounds_since_todo += 1  # s05: 每轮工具执行递增
         tool_results = []
         for block in assistant_content:
             if block["type"] == "tool_use":
@@ -117,6 +125,10 @@ def agent_loop(messages: list):
                 output = handler(**args) if handler else f"Unknown tool: {name}"
 
                 trigger_hooks("PostToolUse", block, output)
+
+                # s05: todo_write 命中 → 重置 nag 计数器
+                if name == "todo_write":
+                    rounds_since_todo = 0
 
                 print(str(output)[:200])
                 tool_results.append({

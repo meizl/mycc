@@ -2,6 +2,7 @@
 工具实现 + 定义 + 分发映射。
 """
 
+import ast
 import difflib
 import json
 import os
@@ -246,6 +247,7 @@ def run_ask(question: str) -> str:
 # ═══════════════════════════════════════════════════════════
 
 _tasks: list[dict] = []  # 内存中的任务列表
+CURRENT_TODOS: list[dict] = []  # s05: todo_write 规划的步骤
 
 def run_task_create(subject: str, description: str = "") -> str:
     """创建任务"""
@@ -276,6 +278,45 @@ def run_task_update(task_id: str, status: str) -> str:
             t["status"] = status
             return f"Task #{task_id}: {old} → {status}"
     return f"Error: task #{task_id} not found"
+
+
+# ── s05: todo_write — 批量规划步骤 ──
+
+def _normalize_todos(todos):
+    """校验并标准化 todos 输入（支持 list 或 JSON 字符串）"""
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except json.JSONDecodeError:
+            try:
+                todos = ast.literal_eval(todos)
+            except (SyntaxError, ValueError):
+                return None, "Error: todos must be a list or JSON array string"
+    if not isinstance(todos, list):
+        return None, "Error: todos must be a list"
+    for i, t in enumerate(todos):
+        if not isinstance(t, dict):
+            return None, f"Error: todos[{i}] must be an object"
+        if "content" not in t or "status" not in t:
+            return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        if t["status"] not in ("pending", "in_progress", "completed"):
+            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
+    return todos, None
+
+
+def run_todo_write(todos: list) -> str:
+    """批量更新当前任务计划，终端打印格式化列表"""
+    global CURRENT_TODOS
+    todos, error = _normalize_todos(todos)
+    if error:
+        return error
+    CURRENT_TODOS = todos
+    lines = ["\n\033[33m## Current Tasks\033[0m"]
+    for t in CURRENT_TODOS:
+        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
+        lines.append(f"  [{icon}] {t['content']}")
+    print("\n".join(lines))
+    return f"Updated {len(CURRENT_TODOS)} tasks"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -365,6 +406,16 @@ TOOLS = [
                       "required": ["question"]}},
 
     # ── 任务管理 ──
+    {"name": "todo_write",
+     "description": "Create and manage a task list for your current coding session. Use this to plan steps before executing multi-step tasks, and update status as you go.",
+     "input_schema": {"type": "object",
+                      "properties": {"todos": {"type": "array",
+                                               "items": {"type": "object",
+                                                         "properties": {"content": {"type": "string", "description": "Task description"},
+                                                                        "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+                                                         "required": ["content", "status"]}}},
+                      "required": ["todos"]}},
+
     {"name": "task_create",
      "description": "Create a task for tracking complex multi-step work.",
      "input_schema": {"type": "object",
@@ -402,6 +453,7 @@ TOOL_HANDLERS = {
     "web_fetch": run_web_fetch,
     "web_search": run_web_search,
     "ask_user": run_ask,
+    "todo_write": run_todo_write,
     "task_create": run_task_create,
     "task_list": run_task_list,
     "task_update": run_task_update,
