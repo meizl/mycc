@@ -87,7 +87,7 @@ def spawn_subagent(client, model: str, description: str) -> str:
             system=SUB_SYSTEM,
             messages=messages,
             tools=SUB_TOOLS,
-            max_tokens=8000,
+            max_tokens=10000,
         )
         messages.append({"role": "assistant", "content": response.content})
 

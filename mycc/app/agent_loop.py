@@ -24,6 +24,7 @@ from tools import TOOLS, TOOL_HANDLERS
 from hooks import trigger_hooks, init_hooks
 from subagent import spawn_subagent
 from skill_loader import list_skills
+from compact import compact_pipeline
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -58,12 +59,15 @@ def agent_loop(messages: list):
                              "content": "<reminder>Update your todos.</reminder>"})
             rounds_since_todo = 0
 
+        # s08: 上下文压缩管道 — 规则 L1/L2/L3 + 投影 L4 + AutoCompact
+        api_messages = compact_pipeline(messages, client, MODEL)
+
         content_blocks = {}
         stop_reason = None
 
         with client.messages.stream(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+            model=MODEL, system=SYSTEM, messages=api_messages,
+            tools=TOOLS, max_tokens=10000,
         ) as stream:
             for event in stream:
                 if event.type == "content_block_start":

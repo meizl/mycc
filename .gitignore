@@ -31,3 +31,5 @@ env/
 
 # 其他
 *.log
+.task_outputs/
+.transcripts/
