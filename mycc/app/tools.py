@@ -435,6 +435,13 @@ TOOLS = [
                       "properties": {"task_id": {"type": "string"},
                                      "status": {"type": "string", "enum": ["pending", "in_progress", "done", "cancelled"]}},
                       "required": ["task_id", "status"]}},
+
+    # ── 子 agent ──
+    {"name": "task",
+     "description": "Launch a subagent to handle a complex subtask with fresh context. Subagent returns only the final summary.",
+     "input_schema": {"type": "object",
+                      "properties": {"description": {"type": "string", "description": "Task description for the subagent"}},
+                      "required": ["description"]}},
 ]
 
 # ═══════════════════════════════════════════════════════════

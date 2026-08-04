@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from tools import TOOLS, TOOL_HANDLERS
 from hooks import trigger_hooks, init_hooks
+from subagent import spawn_subagent
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -32,7 +33,10 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
-SYSTEM = "You are a coding agent. Before starting any multi-step task, use todo_write to plan your steps. Update status as you go."
+# s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
+TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
+
+SYSTEM = "You are a coding agent. For complex sub-problems, use the task tool to spawn a subagent. Before multi-step tasks, use todo_write to plan."
 
 
 # ── The core pattern: streaming agent loop ───────────────────────
