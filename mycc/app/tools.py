@@ -12,6 +12,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+from skill_loader import load_skill as _load_skill
+
 WORKDIR = Path.cwd()
 
 # ═══════════════════════════════════════════════════════════
@@ -442,6 +444,13 @@ TOOLS = [
      "input_schema": {"type": "object",
                       "properties": {"description": {"type": "string", "description": "Task description for the subagent"}},
                       "required": ["description"]}},
+
+    # ── 技能 ──
+    {"name": "load_skill",
+     "description": "Load the full content of a skill by name. Use when you need detailed instructions for a specific task type.",
+     "input_schema": {"type": "object",
+                      "properties": {"name": {"type": "string", "description": "Skill name from the catalog"}},
+                      "required": ["name"]}},
 ]
 
 # ═══════════════════════════════════════════════════════════
@@ -464,4 +473,5 @@ TOOL_HANDLERS = {
     "task_create": run_task_create,
     "task_list": run_task_list,
     "task_update": run_task_update,
+    "load_skill": _load_skill,
 }

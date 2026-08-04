@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from tools import TOOLS, TOOL_HANDLERS
 from hooks import trigger_hooks, init_hooks
 from subagent import spawn_subagent
+from skill_loader import list_skills
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -36,7 +37,14 @@ MODEL = os.environ["MODEL_ID"]
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
 TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
 
-SYSTEM = "You are a coding agent. For complex sub-problems, use the task tool to spawn a subagent. Before multi-step tasks, use todo_write to plan."
+# s07: SYSTEM 动态包含技能目录（Layer 1 — 便宜），完整内容通过 load_skill 按需加载（Layer 2）
+SYSTEM = (
+    f"You are a coding agent.\n"
+    f"Skills available:\n{list_skills()}\n"
+    "Use load_skill to get full details when needed. "
+    "For complex sub-problems, use task to spawn a subagent. "
+    "Before multi-step tasks, use todo_write to plan."
+)
 
 
 # ── The core pattern: streaming agent loop ───────────────────────
