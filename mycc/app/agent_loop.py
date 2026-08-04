@@ -20,7 +20,7 @@ except ImportError:
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-from tools import TOOLS, TOOL_HANDLERS
+from tools import TOOLS, TOOL_HANDLERS, WORKDIR
 from hooks import trigger_hooks, init_hooks
 from subagent import spawn_subagent
 from skill_loader import list_skills
@@ -38,14 +38,46 @@ MODEL = os.environ["MODEL_ID"]
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
 TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
 
+
+# ── CLAUDE.md 加载 ──────────────────────────────────────
+
+def load_claude_md() -> str:
+    """从当前目录向上查找 CLAUDE.md，返回带标注的内容。"""
+    current = WORKDIR.resolve()
+    tried = []
+    while True:
+        candidate = current / "CLAUDE.md"
+        tried.append(str(candidate))
+        if candidate.is_file():
+            content = candidate.read_text(encoding="utf-8", errors="replace")
+            # 截断过长的文件（超过 8000 字符的部分用摘要替代）
+            if len(content) > 8000:
+                content = content[:8000] + "\n\n... (truncated)"
+            return (
+                f"<project-context source=\"{candidate}\">\n"
+                f"{content}\n"
+                f"</project-context>"
+            )
+        if current.parent == current:
+            break  # 已到文件系统根
+        current = current.parent
+    return ""
+
 # s07: SYSTEM 动态包含技能目录（Layer 1 — 便宜），完整内容通过 load_skill 按需加载（Layer 2）
 SYSTEM = (
     f"You are a coding agent.\n"
     f"Skills available:\n{list_skills()}\n"
     "Use load_skill to get full details when needed. "
     "For complex sub-problems, use task to spawn a subagent. "
-    "Before multi-step tasks, use todo_write to plan."
+    "Before multi-step tasks, use todo_write to plan. "
+    "Read files before editing — never guess content."
 )
+
+# s09: 加载 CLAUDE.md 注入 SYSTEM
+claude_md = load_claude_md()
+if claude_md:
+    SYSTEM = claude_md + "\n\n" + SYSTEM
+    print(f"\033[90mLoaded CLAUDE.md\033[0m")
 
 
 # ── The core pattern: streaming agent loop ───────────────────────
