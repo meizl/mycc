@@ -6,6 +6,7 @@ Agent Loop — 流式调用 + 工具执行循环。
 
 import json
 import os
+import time
 
 # readline：提供命令行编辑能力（方向键、历史记录等）
 try:
@@ -36,13 +37,10 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
-# s11: max_tokens 恢复
-DEFAULT_MAX_TOKENS = 8000
-ESCALATED_MAX_TOKENS = 64000
-MAX_CONTINUATIONS = 3
-CONTINUATION_PROMPT = (
-    "Output token limit hit. Resume directly — "
-    "no apology, no recap. Pick up mid-thought."
+from error_recovery import (
+    DEFAULT_MAX_TOKENS, ESCALATED_MAX_TOKENS, MAX_CONTINUATIONS, CONTINUATION_PROMPT,
+    FALLBACK_MODEL, MAX_RETRIES, MAX_CONSECUTIVE_529,
+    RecoveryState, retry_delay, is_rate_limit_error, is_overloaded_error,
 )
 
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
@@ -104,6 +102,7 @@ def agent_loop(messages: list):
     rounds_since_todo = 0  # s05: nag 计数器
     max_tokens = DEFAULT_MAX_TOKENS          # s11: 动态 max_tokens
     continuation_count = 0                    # s11: 续写次数
+    state = RecoveryState(MODEL)              # s11: 恢复状态（529/模型切换）
     while True:
         # s05: 3 轮没更新 todo → 注入提醒
         if rounds_since_todo >= 3 and messages:
@@ -118,41 +117,83 @@ def agent_loop(messages: list):
         memories_content = load_memories(client, MODEL, messages)
         api_messages = inject_memories(api_messages, memories_content)
 
-        content_blocks = {}
-        stop_reason = None
+        # s11: 429/529 退避重试 — 包裹流式调用
+        for retry_attempt in range(MAX_RETRIES):
+            content_blocks = {}
+            stop_reason = None
 
-        with client.messages.stream(
-            model=MODEL, system=SYSTEM, messages=api_messages,
-            tools=TOOLS, max_tokens=max_tokens,
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_start":
-                    block = event.content_block
+            try:
+                with client.messages.stream(
+                    model=state.current_model, system=SYSTEM, messages=api_messages,
+                    tools=TOOLS, max_tokens=max_tokens,
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content_block_start":
+                            block = event.content_block
 
-                    if block.type == "text":
-                        content_blocks[event.index] = {"type": "text", "text": ""}
-                        print("\033[0m", end="")
+                            if block.type == "text":
+                                content_blocks[event.index] = {"type": "text", "text": ""}
+                                print("\033[0m", end="")
 
-                    elif block.type == "tool_use":
-                        content_blocks[event.index] = {
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": "",
-                        }
+                            elif block.type == "tool_use":
+                                content_blocks[event.index] = {
+                                    "type": "tool_use",
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "input": "",
+                                }
 
-                elif event.type == "content_block_delta":
-                    delta = event.delta
+                        elif event.type == "content_block_delta":
+                            delta = event.delta
 
-                    if delta.type == "text_delta":
-                        content_blocks[event.index]["text"] += delta.text
-                        print(delta.text, end="", flush=True)
+                            if delta.type == "text_delta":
+                                content_blocks[event.index]["text"] += delta.text
+                                print(delta.text, end="", flush=True)
 
-                    elif delta.type == "input_json_delta":
-                        content_blocks[event.index]["input"] += delta.partial_json
+                            elif delta.type == "input_json_delta":
+                                content_blocks[event.index]["input"] += delta.partial_json
 
-                elif event.type == "message_delta":
-                    stop_reason = event.delta.stop_reason
+                        elif event.type == "message_delta":
+                            stop_reason = event.delta.stop_reason
+
+                # 成功：重置 529 计数器，退出重试循环
+                state.consecutive_529 = 0
+                break
+
+            except Exception as e:
+                # 429 限流 -> 指数退避
+                if is_rate_limit_error(e):
+                    delay = retry_delay(retry_attempt)
+                    print(f"\n  \033[33m[429 rate limit] retry {retry_attempt+1}/{MAX_RETRIES},"
+                          f" wait {delay:.1f}s\033[0m")
+                    time.sleep(delay)
+                    continue
+
+                # 529 过载 -> 退避 + 备用模型
+                if is_overloaded_error(e):
+                    state.consecutive_529 += 1
+                    if state.consecutive_529 >= MAX_CONSECUTIVE_529:
+                        if FALLBACK_MODEL:
+                            state.current_model = FALLBACK_MODEL
+                            state.consecutive_529 = 0
+                            print(f"\n  \033[31m[529 x{MAX_CONSECUTIVE_529}]"
+                                  f" switching to {FALLBACK_MODEL}\033[0m")
+                        else:
+                            state.consecutive_529 = 0
+                            print(f"\n  \033[31m[529 x{MAX_CONSECUTIVE_529}]"
+                                  f" no FALLBACK_MODEL_ID configured\033[0m")
+                    delay = retry_delay(retry_attempt)
+                    print(f"  \033[33m[529 overloaded] retry {retry_attempt+1}/{MAX_RETRIES},"
+                          f" wait {delay:.1f}s\033[0m")
+                    time.sleep(delay)
+                    continue
+
+                # 非瞬时错误 -> 往上抛（Path 2 prompt_too_long 以后会在这里处理）
+                raise
+        else:
+            # 全部重试耗尽
+            print(f"  \033[31m[unrecoverable] max retries ({MAX_RETRIES}) exceeded\033[0m")
+            return
 
         # 组装 assistant 消息
         assistant_content = [
