@@ -36,6 +36,15 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
+# s11: max_tokens 恢复
+DEFAULT_MAX_TOKENS = 8000
+ESCALATED_MAX_TOKENS = 64000
+MAX_CONTINUATIONS = 3
+CONTINUATION_PROMPT = (
+    "Output token limit hit. Resume directly — "
+    "no apology, no recap. Pick up mid-thought."
+)
+
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
 TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
 
@@ -93,6 +102,8 @@ if memory_system:
 
 def agent_loop(messages: list):
     rounds_since_todo = 0  # s05: nag 计数器
+    max_tokens = DEFAULT_MAX_TOKENS          # s11: 动态 max_tokens
+    continuation_count = 0                    # s11: 续写次数
     while True:
         # s05: 3 轮没更新 todo → 注入提醒
         if rounds_since_todo >= 3 and messages:
@@ -112,7 +123,7 @@ def agent_loop(messages: list):
 
         with client.messages.stream(
             model=MODEL, system=SYSTEM, messages=api_messages,
-            tools=TOOLS, max_tokens=10000,
+            tools=TOOLS, max_tokens=max_tokens,
         ) as stream:
             for event in stream:
                 if event.type == "content_block_start":
@@ -154,6 +165,22 @@ def agent_loop(messages: list):
                 block["input"] = json.loads(block["input"])
 
         messages.append({"role": "assistant", "content": assistant_content})
+
+        # s11: max_tokens 恢复 — 升级 + 续写
+        if stop_reason == "max_tokens":
+            if continuation_count == 0:
+                max_tokens = ESCALATED_MAX_TOKENS
+                print(f"\n  \033[33m[max_tokens] escalating"
+                      f" {DEFAULT_MAX_TOKENS} -> {ESCALATED_MAX_TOKENS}\033[0m")
+            if continuation_count < MAX_CONTINUATIONS:
+                continuation_count += 1
+                messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+                print(f"  \033[33m[max_tokens] continuation"
+                      f" {continuation_count}/{MAX_CONTINUATIONS}\033[0m")
+                continue
+            print(f"  \033[31m[max_tokens] recovery limit reached"
+                  f" ({MAX_CONTINUATIONS} continuations)\033[0m")
+            return
 
         if stop_reason != "tool_use":
             # s04: Stop hook — memory extract runs in bg thread via s09 hook
