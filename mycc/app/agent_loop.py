@@ -25,6 +25,7 @@ from hooks import trigger_hooks, init_hooks
 from subagent import spawn_subagent
 from skill_loader import list_skills
 from compact import compact_pipeline
+from memory import build_memory_system, register_memory_hooks, load_memories, inject_memories
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -37,6 +38,9 @@ MODEL = os.environ["MODEL_ID"]
 
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
 TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
+
+# s09: 注册记忆提取钩子 — turn 结束时后台子线程异步提取
+register_memory_hooks(client, MODEL)
 
 
 # ── CLAUDE.md 加载 ──────────────────────────────────────
@@ -79,6 +83,11 @@ if claude_md:
     SYSTEM = claude_md + "\n\n" + SYSTEM
     print(f"\033[90mLoaded CLAUDE.md\033[0m")
 
+# s09: 注入记忆索引到 SYSTEM（便宜，只读 MEMORY.md）
+memory_system = build_memory_system()
+if memory_system:
+    SYSTEM += "\n\n" + memory_system
+
 
 # ── The core pattern: streaming agent loop ───────────────────────
 
@@ -93,6 +102,10 @@ def agent_loop(messages: list):
 
         # s08: 上下文压缩管道 — 规则 L1/L2/L3 + 投影 L4 + AutoCompact
         api_messages = compact_pipeline(messages, client, MODEL)
+
+        # s09: 按需加载相关记忆 + 注入（只在当前是用户消息时生效）
+        memories_content = load_memories(client, MODEL, messages)
+        api_messages = inject_memories(api_messages, memories_content)
 
         content_blocks = {}
         stop_reason = None
@@ -143,7 +156,7 @@ def agent_loop(messages: list):
         messages.append({"role": "assistant", "content": assistant_content})
 
         if stop_reason != "tool_use":
-            # s04: Stop hook — 可注入消息让循环继续
+            # s04: Stop hook — memory extract runs in bg thread via s09 hook
             force = trigger_hooks("Stop", messages)
             if force:
                 messages.append({"role": "user", "content": force})
