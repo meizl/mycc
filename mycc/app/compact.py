@@ -14,6 +14,7 @@ Compact — 上下文压缩管道。
 L1/L2/L3 便宜先跑（规则），L4 按需投影（可能调模型）。
 """
 
+import time
 from pathlib import Path
 
 WORKDIR = Path.cwd()
@@ -22,8 +23,11 @@ TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 # ── 阈值 ──
 MAX_MESSAGES = 50             # L1: 超过 50 条消息触发裁剪
 KEEP_RECENT = 3               # L2: 可重跑工具保留最近 3 个 tool_result
+MICRO_COMPACT_COOLDOWN = 3600 # L2: 冷却时间（秒），1 小时内不重复触发
 PERSIST_THRESHOLD = 10_000    # L3: 单个结果 > 10k 字符才存盘
 MAX_TOOL_RESULT_BYTES = 200_000  # L3: 本轮 tool_results 总大小上限
+
+_last_micro_compact_time: float = 0.0  # L2: 上次 micro_compact 执行时间戳
 
 # L2: 可重新获取结果的工具（幂等读取类）— 可以安全压缩
 REOBTAINABLE_TOOLS = {
@@ -223,7 +227,16 @@ def micro_compact(messages: list) -> list:
 
     不可复现的工具（write_file, ask_user, task 等）— 永不压缩。
     不删除 block（保持 tool_use/tool_result 配对完整），只原地修改 content。
+
+    冷却机制：两次触发间隔至少 MICRO_COMPACT_COOLDOWN 秒（默认 1 小时），
+    避免频繁压缩。
     """
+    global _last_micro_compact_time
+
+    now = time.time()
+    if now - _last_micro_compact_time < MICRO_COMPACT_COOLDOWN:
+        return messages
+
     tool_results = collect_tool_results(messages)
 
     # 建立 tool_use_id → tool_name 映射，区分可重跑 vs 不可复现
@@ -241,6 +254,7 @@ def micro_compact(messages: list) -> list:
         if len(block.get("content", "")) > 120:
             block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
 
+    _last_micro_compact_time = now
     return messages
 
 
