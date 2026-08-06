@@ -6,10 +6,13 @@ import ast
 import difflib
 import json
 import os
+import random
 import re
 import subprocess
+import time
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from skill_loader import load_skill as _load_skill
@@ -245,41 +248,128 @@ def run_ask(question: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-#  任务管理
+#  任务管理 — 磁盘持久化 + 依赖图
 # ═══════════════════════════════════════════════════════════
 
-_tasks: list[dict] = []  # 内存中的任务列表
-CURRENT_TODOS: list[dict] = []  # s05: todo_write 规划的步骤
+TASKS_DIR = WORKDIR / ".tasks"
+TASKS_DIR.mkdir(exist_ok=True)
 
-def run_task_create(subject: str, description: str = "") -> str:
-    """创建任务"""
-    task_id = str(len(_tasks) + 1)
-    _tasks.append({
-        "id": task_id,
-        "subject": subject,
-        "description": description,
-        "status": "pending",
-    })
-    return f"Task #{task_id} created: {subject}"
+CURRENT_TODOS: list[dict] = []  # s05: todo_write 规划的步骤（会话级，内存）
+
+
+@dataclass
+class Task:
+    id: str
+    subject: str
+    description: str
+    status: str              # pending | in_progress | done | cancelled
+    owner: object            # Optional[str] — 认领者（避免 str | None 语法）
+    blockedBy: list          # 依赖的前置任务 ID
+
+
+def _task_path(task_id: str) -> Path:
+    return TASKS_DIR / f"{task_id}.json"
+
+
+def save_task(task: Task):
+    _task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
+
+
+def load_task(task_id: str) -> Task:
+    return Task(**json.loads(_task_path(task_id).read_text()))
+
+
+def list_tasks_from_disk() -> list[Task]:
+    return [Task(**json.loads(p.read_text()))
+            for p in sorted(TASKS_DIR.glob("task_*.json"))]
+
+
+def can_start(task_id: str) -> bool:
+    """检查所有 blockedBy 依赖是否已完成。缺失的依赖视为阻塞。"""
+    task = load_task(task_id)
+    for dep_id in task.blockedBy:
+        if not _task_path(dep_id).exists():
+            return False
+        if load_task(dep_id).status != "done":
+            return False
+    return True
+
+
+def run_task_create(subject: str, description: str = "",
+                    blockedBy=None) -> str:
+    """创建任务，写入磁盘 JSON 文件"""
+    task = Task(
+        id=f"task_{int(time.time())}_{random.randint(0, 9999):04d}",
+        subject=subject,
+        description=description,
+        status="pending",
+        owner=None,
+        blockedBy=blockedBy or [],
+    )
+    save_task(task)
+    deps = f" (blockedBy: {', '.join(blockedBy)})" if blockedBy else ""
+    print(f"  \033[34m[create] {task.subject}{deps}\033[0m")
+    return f"Created {task.id}: {task.subject}{deps}"
+
 
 def run_task_list() -> str:
-    """列出所有任务"""
-    if not _tasks:
+    """列出所有任务（从磁盘读取）"""
+    tasks = list_tasks_from_disk()
+    if not tasks:
         return "(no tasks)"
     out = []
-    for t in _tasks:
-        icon = {"pending": "○", "in_progress": "◉", "done": "✓", "cancelled": "✗"}.get(t["status"], "?")
-        out.append(f"[{icon}] #{t['id']} {t['subject']}")
+    for t in tasks:
+        icon = {"pending": "○", "in_progress": "◉",
+                "done": "✓", "cancelled": "✗"}.get(t.status, "?")
+        deps = f" (blockedBy: {', '.join(t.blockedBy)})" if t.blockedBy else ""
+        owner = f" [{t.owner}]" if t.owner else ""
+        out.append(f"[{icon}] {t.id}: {t.subject} [{t.status}]{owner}{deps}")
     return "\n".join(out)
 
+
 def run_task_update(task_id: str, status: str) -> str:
-    """更新任务状态 (pending / in_progress / done / cancelled)"""
-    for t in _tasks:
-        if t["id"] == task_id:
-            old = t["status"]
-            t["status"] = status
-            return f"Task #{task_id}: {old} → {status}"
-    return f"Error: task #{task_id} not found"
+    """更新任务状态。设为 in_progress 时校验依赖是否满足。"""
+    try:
+        task = load_task(task_id)
+    except FileNotFoundError:
+        return f"Error: task {task_id} not found"
+
+    old = task.status
+
+    # 设为 in_progress 时检查依赖
+    if status == "in_progress" and not can_start(task_id):
+        blocked = [d for d in task.blockedBy
+                   if not _task_path(d).exists() or load_task(d).status != "done"]
+        return f"Error: {task_id} is blocked by: {blocked}"
+
+    task.status = status
+    if status in ("done", "cancelled"):
+        task.owner = None  # 释放认领
+    if status == "in_progress" and not task.owner:
+        task.owner = "agent"
+    save_task(task)
+
+    msg = f"{task_id} ({task.subject}): {old} → {status}"
+    print(f"  \033[33m[update] {msg}\033[0m")
+
+    # 完成时报告解封的下游任务
+    if status == "done":
+        unblocked = [t.subject for t in list_tasks_from_disk()
+                     if t.status == "pending" and t.blockedBy and can_start(t.id)]
+        if unblocked:
+            msg += f"\nUnblocked: {', '.join(unblocked)}"
+            print(f"  \033[32m[unblocked] {', '.join(unblocked)}\033[0m")
+
+    return msg
+
+
+def run_get_task(task_id: str) -> str:
+    """返回任务完整 JSON 详情"""
+    try:
+        task = load_task(task_id)
+        return json.dumps(asdict(task), indent=2)
+    except FileNotFoundError:
+        return f"Error: task {task_id} not found"
 
 
 # ── s05: todo_write — 批量规划步骤 ──
@@ -419,24 +509,33 @@ TOOLS = [
                       "required": ["todos"]}},
 
     {"name": "task_create",
-     "description": "Create a task for tracking complex multi-step work.",
+     "description": "Create a persistent task with optional blockedBy dependencies. Tasks survive restarts.",
      "input_schema": {"type": "object",
                       "properties": {"subject": {"type": "string"},
-                                     "description": {"type": "string"}},
+                                     "description": {"type": "string"},
+                                     "blockedBy": {"type": "array",
+                                                   "items": {"type": "string"},
+                                                   "description": "Task IDs that must be done before this one"}},
                       "required": ["subject"]}},
 
     {"name": "task_list",
-     "description": "List all tasks with their status.",
+     "description": "List all persistent tasks with status, owner, and dependencies.",
      "input_schema": {"type": "object",
                       "properties": {},
                       "required": []}},
 
     {"name": "task_update",
-     "description": "Update task status: pending, in_progress, done, or cancelled.",
+     "description": "Update task status. Setting to in_progress checks blockedBy dependencies — returns error if blocked.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"},
                                      "status": {"type": "string", "enum": ["pending", "in_progress", "done", "cancelled"]}},
                       "required": ["task_id", "status"]}},
+
+    {"name": "get_task",
+     "description": "Get full JSON details of a specific task by ID.",
+     "input_schema": {"type": "object",
+                      "properties": {"task_id": {"type": "string"}},
+                      "required": ["task_id"]}},
 
     # ── 子 agent ──
     {"name": "task",
@@ -473,5 +572,6 @@ TOOL_HANDLERS = {
     "task_create": run_task_create,
     "task_list": run_task_list,
     "task_update": run_task_update,
+    "get_task": run_get_task,
     "load_skill": _load_skill,
 }

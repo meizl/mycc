@@ -81,6 +81,7 @@ SYSTEM = (
     "Use load_skill to get full details when needed. "
     "For complex sub-problems, use task to spawn a subagent. "
     "Before multi-step tasks, use todo_write to plan. "
+    "Use task_create / task_list / task_update for persistent task tracking with dependencies. "
     "Read files before editing — never guess content."
 )
 
@@ -255,8 +256,8 @@ def agent_loop(messages: list):
 
                 trigger_hooks("PostToolUse", block, output)
 
-                # s05: todo_write 命中 → 重置 nag 计数器
-                if name == "todo_write":
+                # s05: 任务管理工具命中 → 重置 nag 计数器
+                if name in ("todo_write", "task_create", "task_update"):
                     rounds_since_todo = 0
 
                 print(str(output)[:200])

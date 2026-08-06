@@ -33,3 +33,4 @@ env/
 *.log
 .task_outputs/
 .transcripts/
+.tasks/
