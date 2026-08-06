@@ -34,3 +34,4 @@ env/
 .task_outputs/
 .transcripts/
 .tasks/
+.scheduled_tasks.json

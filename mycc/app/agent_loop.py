@@ -27,6 +27,7 @@ from subagent import spawn_subagent
 from skill_loader import list_skills
 from compact import compact_pipeline
 from memory import build_memory_system, register_memory_hooks, load_memories, inject_memories
+from cron import init_cron
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -48,6 +49,9 @@ TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, descri
 
 # s09: 注册记忆提取钩子 — turn 结束时后台子线程异步提取
 register_memory_hooks(client, MODEL)
+
+# s14: 启动 cron 调度器 — 独立 daemon 线程，定时触发子 agent
+init_cron(client, MODEL)
 
 
 # ── CLAUDE.md 加载 ──────────────────────────────────────
@@ -257,7 +261,8 @@ def agent_loop(messages: list):
                 trigger_hooks("PostToolUse", block, output)
 
                 # s05: 任务管理工具命中 → 重置 nag 计数器
-                if name in ("todo_write", "task_create", "task_update"):
+                if name in ("todo_write", "task_create", "task_update",
+                            "schedule_cron", "cancel_cron"):
                     rounds_since_todo = 0
 
                 print(str(output)[:200])

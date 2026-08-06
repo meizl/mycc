@@ -16,6 +16,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from skill_loader import load_skill as _load_skill
+from cron import run_schedule_cron, run_list_crons, run_cancel_cron, run_cron_results
 
 WORKDIR = Path.cwd()
 
@@ -544,6 +545,33 @@ TOOLS = [
                       "properties": {"description": {"type": "string", "description": "Task description for the subagent"}},
                       "required": ["description"]}},
 
+    # ── 定时任务 ──
+    {"name": "schedule_cron",
+     "description": "Schedule a recurring or one-shot cron job. cron is 5-field: min hour dom month dow. Fires in a subagent — won't interrupt your session.",
+     "input_schema": {"type": "object",
+                      "properties": {
+                          "cron": {"type": "string", "description": "5-field cron expression, e.g. '0 9 * * *'"},
+                          "prompt": {"type": "string", "description": "Task for the subagent to execute when fired"},
+                          "recurring": {"type": "boolean", "description": "True=repeat, False=one-shot"},
+                          "durable": {"type": "boolean", "description": "True=survive restart"}},
+                      "required": ["cron", "prompt"]}},
+
+    {"name": "list_crons",
+     "description": "List all registered cron jobs with their schedule and status.",
+     "input_schema": {"type": "object", "properties": {},
+                      "required": []}},
+
+    {"name": "cancel_cron",
+     "description": "Cancel a cron job by its ID.",
+     "input_schema": {"type": "object",
+                      "properties": {"job_id": {"type": "string"}},
+                      "required": ["job_id"]}},
+
+    {"name": "cron_results",
+     "description": "Show recent cron execution results from subagents.",
+     "input_schema": {"type": "object", "properties": {},
+                      "required": []}},
+
     # ── 技能 ──
     {"name": "load_skill",
      "description": "Load the full content of a skill by name. Use when you need detailed instructions for a specific task type.",
@@ -573,5 +601,9 @@ TOOL_HANDLERS = {
     "task_list": run_task_list,
     "task_update": run_task_update,
     "get_task": run_get_task,
+    "schedule_cron": run_schedule_cron,
+    "list_crons": run_list_crons,
+    "cancel_cron": run_cancel_cron,
+    "cron_results": run_cron_results,
     "load_skill": _load_skill,
 }
