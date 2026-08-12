@@ -6,6 +6,8 @@ Agent Loop — 流式调用 + 工具执行循环。
 
 import json
 import os
+import queue
+import threading
 import time
 
 # readline：提供命令行编辑能力（方向键、历史记录等）
@@ -30,6 +32,8 @@ from skill_loader import list_skills
 from compact import compact_pipeline
 from memory import build_memory_system, register_memory_hooks, load_memories, inject_memories
 from cron import init_cron, drain_cron_notifications
+from message_bus import BUS
+from teammate import spawn_teammate_async, active_teammates
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -48,6 +52,11 @@ from error_recovery import (
 
 # s06: 注册 task 工具 — 需要 client 和 MODEL，所以在这里注入
 TOOL_HANDLERS["task"] = lambda description: spawn_subagent(client, MODEL, description)
+
+# s16: 注册 spawn_teammate 工具 — 需要 client 和 MODEL
+TOOL_HANDLERS["spawn_teammate"] = (
+    lambda name, role, prompt: spawn_teammate_async(name, role, prompt, client, MODEL)
+)
 
 # s09: 注册记忆提取钩子 — turn 结束时后台子线程异步提取
 register_memory_hooks(client, MODEL)
@@ -85,7 +94,10 @@ SYSTEM = (
     f"You are a coding agent.\n"
     f"Skills available:\n{list_skills()}\n"
     "Use load_skill to get full details when needed. "
-    "For complex sub-problems, use task to spawn a subagent. "
+    "For complex sub-problems, use task to spawn a subagent (synchronous, waits for result). "
+    "For parallel work, use spawn_teammate to send a task to a background teammate (asynchronous, result arrives via inbox). "
+    "Teammates run independently — you can continue working while they finish. "
+    "Use send_message to communicate with teammates, check_inbox to read their replies. "
     "Before multi-step tasks, use todo_write to plan. "
     "Use task_create / task_list / task_update for persistent task tracking with dependencies. "
     "For slow bash commands (install, build, test, deploy), set run_in_background=true to avoid blocking. "
@@ -304,28 +316,95 @@ def agent_loop(messages: list):
 
 # ── Entry point ──────────────────────────────────────────
 
+def _drain_inbox() -> str | None:
+    """消费收件箱消息 + 后台任务结果，拼成一条 user message。
+    返回 None 表示没有待处理的内容。"""
+    parts = []
+    # teammate 消息
+    msgs = BUS.read_inbox("lead")
+    if msgs:
+        parts.append("[Inbox]\n" + "\n".join(
+            f"From {m['from']}: {m['content'][:200]}" for m in msgs))
+    # s13 后台任务结果
+    bg = collect_background_results()
+    parts.extend(bg)
+    if parts:
+        return "\n".join(parts)
+    return None
+
+
+def _has_pending_events() -> bool:
+    """检查是否有待处理的异步事件（teammate 消息或后台任务结果）。"""
+    return BUS.peek("lead") or _has_pending_background()
+
+
+def _has_pending_background() -> bool:
+    """Non-destructive: True if any background task has completed."""
+    from tools import background_tasks
+    return any(t["status"] == "completed" for t in background_tasks.values())
+
+
 if __name__ == "__main__":
     init_hooks()
     print("Agent Loop — 流式 + 多工具 + Hooks")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
+
+    # s16: 事件队列 — 统一用户输入和后台事件
+    events = queue.Queue()
+
+    def input_reader():
+        while True:
+            try:
+                line = input("\033[36m>> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                events.put(("quit", None))
+                return
+            events.put(("user", line))
+
+    def inbox_poller():
+        """每秒检查收件箱和后台任务，有结果时唤醒 Leader。"""
+        while True:
+            time.sleep(1)
+            if BUS.peek("lead") or _has_pending_background():
+                events.put(("wake", None))
+
+    threading.Thread(target=input_reader, daemon=True).start()
+    threading.Thread(target=inbox_poller, daemon=True).start()
+    print("  \033[90m[events] inbox poller started\033[0m")
+
+    had_teammates = False
     while True:
-        try:
-            query = input("\033[36m>> \033[0m")
-        except (EOFError, KeyboardInterrupt):
+        kind, payload = events.get()
+        if kind == "quit":
             break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        trigger_hooks("UserPromptSubmit", query)
+        if kind == "user":
+            if payload.strip().lower() in ("q", "exit", ""):
+                break
+            trigger_hooks("UserPromptSubmit", payload)
 
-        # s14: 注入 cron 子 agent 的完成通知
-        cron_notifs = drain_cron_notifications()
-        for notif in cron_notifs:
-            history.append({"role": "user", "content": notif})
-            print(f"\n  \033[35m[cron notify] injected result\033[0m")
+            # s14: 注入 cron 子 agent 的完成通知
+            cron_notifs = drain_cron_notifications()
+            for notif in cron_notifs:
+                history.append({"role": "user", "content": notif})
+                print(f"\n  \033[35m[cron notify] injected result\033[0m")
 
-        history.append({"role": "user", "content": query})
+            # s16: 注入收件箱消息
+            inbox_content = _drain_inbox()
+            if inbox_content:
+                history.append({"role": "user", "content": inbox_content})
+                print(f"\n  \033[33m[inbox] injected\033[0m")
+
+            history.append({"role": "user", "content": payload})
+
+        else:  # "wake": teammate 消息或后台任务完成
+            inbox_content = _drain_inbox()
+            if not inbox_content:
+                continue  # 已被之前的 wake 消费，幂等跳过
+            history.append({"role": "user", "content": inbox_content})
+            print(f"\n\033[33m[wake] new turn from async events\033[0m")
+
         agent_loop(history)
         # 打印模型的最终文本回复
         response_content = history[-1]["content"]
@@ -334,3 +413,10 @@ if __name__ == "__main__":
                 if getattr(block, "type", None) == "text":
                     print(block.text)
         print()
+
+        # s16: 所有 teammate 完成时提示
+        if active_teammates:
+            had_teammates = True
+        elif had_teammates and not BUS.peek("lead") and not _has_pending_background():
+            print("\033[32m[all teammates done]\033[0m")
+            had_teammates = False

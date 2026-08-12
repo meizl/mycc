@@ -18,6 +18,7 @@ from pathlib import Path
 
 from skill_loader import load_skill as _load_skill
 from cron import run_schedule_cron, run_list_crons, run_cancel_cron, run_cron_results
+from message_bus import BUS
 
 WORKDIR = Path.cwd()
 
@@ -498,6 +499,32 @@ def collect_background_results() -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════════
+#  s16: Agent Teams — teammate 异步派发 + MessageBus 通信
+# ═══════════════════════════════════════════════════════════
+
+def run_spawn_teammate(name: str, role: str, prompt: str) -> str:
+    """占位 — 实际 handler 由 agent_loop.py 注入（需要 client 和 MODEL）。"""
+    return "Error: spawn_teammate not initialized (injected by agent_loop)"
+
+
+def run_send_message(to: str, content: str) -> str:
+    """通过 MessageBus 发送消息给其他 agent。"""
+    BUS.send("lead", to, content)
+    return f"Sent to {to}"
+
+
+def run_check_inbox() -> str:
+    """查看 Lead 的收件箱。消费性读取。"""
+    msgs = BUS.read_inbox("lead")
+    if not msgs:
+        return "(inbox empty)"
+    lines = []
+    for m in msgs:
+        lines.append(f"  [{m['from']}] {m['content'][:200]}")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
 #  工具定义
 # ═══════════════════════════════════════════════════════════
 
@@ -659,6 +686,28 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {},
                       "required": []}},
 
+    # ── Agent Teams ──
+    {"name": "spawn_teammate",
+     "description": "Spawn a teammate agent in a background thread. Teammate works independently and reports back via inbox.",
+     "input_schema": {"type": "object",
+                      "properties": {
+                          "name": {"type": "string", "description": "Short name for the teammate"},
+                          "role": {"type": "string", "description": "What the teammate specializes in"},
+                          "prompt": {"type": "string", "description": "Task description for the teammate"}},
+                      "required": ["name", "role", "prompt"]}},
+
+    {"name": "send_message",
+     "description": "Send a message to another agent via MessageBus.",
+     "input_schema": {"type": "object",
+                      "properties": {"to": {"type": "string", "description": "Recipient agent name"},
+                                     "content": {"type": "string", "description": "Message content"}},
+                      "required": ["to", "content"]}},
+
+    {"name": "check_inbox",
+     "description": "Check Lead's inbox for messages from teammates (destructive read).",
+     "input_schema": {"type": "object", "properties": {},
+                      "required": []}},
+
     # ── 技能 ──
     {"name": "load_skill",
      "description": "Load the full content of a skill by name. Use when you need detailed instructions for a specific task type.",
@@ -692,5 +741,8 @@ TOOL_HANDLERS = {
     "list_crons": run_list_crons,
     "cancel_cron": run_cancel_cron,
     "cron_results": run_cron_results,
+    "spawn_teammate": run_spawn_teammate,
+    "send_message": run_send_message,
+    "check_inbox": run_check_inbox,
     "load_skill": _load_skill,
 }
