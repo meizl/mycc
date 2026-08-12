@@ -44,6 +44,7 @@ _MODEL = ""
 
 # Store recent cron results for the user to check
 cron_results: list[dict] = []  # [{job_id, prompt, summary, time}]
+pending_notifications: list[str] = []  # not yet shown to user
 MAX_RESULTS = 50
 
 
@@ -264,6 +265,15 @@ def _run_cron_subagent(job: CronJob):
     if len(cron_results) > MAX_RESULTS:
         cron_results.pop(0)
 
+    # Queue notification for next user interaction
+    pending_notifications.append(
+        f"<cron_notification>\n"
+        f"  <job_id>{job.id}</job_id>\n"
+        f"  <task>{job.prompt}</task>\n"
+        f"  <summary>{summary}</summary>\n"
+        f"</cron_notification>"
+    )
+
 
 def cron_queue_processor():
     """Poll the queue and spawn subagents for fired cron jobs.
@@ -337,3 +347,13 @@ def run_cron_results() -> str:
         summary = r["summary"][:120]
         lines.append(f"  [{r['time']}] {r['job_id']}: {summary}")
     return "\n".join(lines)
+
+
+def drain_cron_notifications() -> list[str]:
+    """Drain pending cron notifications for injection into main conversation.
+    Called before each user turn in agent_loop."""
+    if not pending_notifications:
+        return []
+    drained = list(pending_notifications)
+    pending_notifications.clear()
+    return drained

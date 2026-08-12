@@ -9,6 +9,7 @@ import os
 import random
 import re
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -413,6 +414,90 @@ def run_todo_write(todos: list) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+#  s15: 后台任务 — daemon 线程异步执行 + 通知注入
+# ═══════════════════════════════════════════════════════════
+
+_bg_counter = 0
+background_tasks: dict[str, dict] = {}   # bg_id → {tool_use_id, command, status}
+background_results: dict[str, str] = {}   # bg_id → output
+background_lock = threading.Lock()
+
+
+def is_slow_operation(tool_name: str, tool_input: dict) -> bool:
+    """关键词兜底：可能超过 30s 的命令自动走后台。只对 bash 生效。"""
+    if tool_name != "bash":
+        return False
+    cmd = tool_input.get("command", "").lower()
+    slow_keywords = ["install", "build", "test", "deploy", "compile",
+                     "docker build", "pip install", "npm install",
+                     "cargo build", "pytest", "make"]
+    return any(kw in cmd for kw in slow_keywords)
+
+
+def should_run_background(tool_name: str, tool_input: dict) -> bool:
+    """模型显式声明优先；否则走关键词兜底。"""
+    if tool_input.get("run_in_background"):
+        return True
+    return is_slow_operation(tool_name, tool_input)
+
+
+def start_background_task(tool_use_id: str, tool_name: str,
+                          tool_input: dict) -> str:
+    """在 daemon 线程中执行工具。返回 bg_id，立即返回不阻塞。"""
+    global _bg_counter
+    _bg_counter += 1
+    bg_id = f"bg_{_bg_counter:04d}"
+    cmd = tool_input.get("command", tool_name)
+
+    def worker():
+        handler = TOOL_HANDLERS.get(tool_name)
+        try:
+            result = handler(**tool_input) if handler else f"Unknown tool: {tool_name}"
+        except Exception as e:
+            result = f"Error: {e}"
+        with background_lock:
+            background_tasks[bg_id]["status"] = "completed"
+            background_results[bg_id] = str(result)
+
+    with background_lock:
+        background_tasks[bg_id] = {
+            "tool_use_id": tool_use_id,
+            "command": cmd,
+            "status": "running",
+        }
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    print(f"  \033[33m[background] dispatched {bg_id}: {cmd[:40]}\033[0m")
+    return bg_id
+
+
+def collect_background_results() -> list[str]:
+    """收集已完成的 background 结果，格式化为 <task_notification>。
+    每个结果只投递一次（pop 出 dict）。"""
+    with background_lock:
+        ready_ids = [bid for bid, task in background_tasks.items()
+                     if task["status"] == "completed"]
+    notifications = []
+    for bg_id in ready_ids:
+        with background_lock:
+            task = background_tasks.pop(bg_id, None)
+            output = background_results.pop(bg_id, "")
+        if task is None:
+            continue
+        summary = output[:200] if len(output) > 200 else output
+        notifications.append(
+            f"<task_notification>\n"
+            f"  <task_id>{bg_id}</task_id>\n"
+            f"  <status>completed</status>\n"
+            f"  <command>{task['command']}</command>\n"
+            f"  <summary>{summary}</summary>\n"
+            f"</task_notification>")
+        print(f"  \033[32m[background done] {bg_id}: "
+              f"{task['command'][:40]} ({len(output)} chars)\033[0m")
+    return notifications
+
+
+# ═══════════════════════════════════════════════════════════
 #  工具定义
 # ═══════════════════════════════════════════════════════════
 
@@ -473,9 +558,11 @@ TOOLS = [
 
     # ── 执行 ──
     {"name": "bash",
-     "description": "Run a shell command.",
+     "description": "Run a shell command. Set run_in_background=true for slow commands (install, build, test, deploy) to avoid blocking.",
      "input_schema": {"type": "object",
-                      "properties": {"command": {"type": "string"}},
+                      "properties": {"command": {"type": "string"},
+                                     "run_in_background": {"type": "boolean",
+                                                           "description": "Run in daemon thread, return placeholder immediately"}},
                       "required": ["command"]}},
 
     # ── 网络 ──

@@ -21,13 +21,15 @@ except ImportError:
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-from tools import TOOLS, TOOL_HANDLERS, WORKDIR
+from tools import (TOOLS, TOOL_HANDLERS, WORKDIR,
+                    should_run_background, start_background_task,
+                    collect_background_results)
 from hooks import trigger_hooks, init_hooks
 from subagent import spawn_subagent
 from skill_loader import list_skills
 from compact import compact_pipeline
 from memory import build_memory_system, register_memory_hooks, load_memories, inject_memories
-from cron import init_cron
+from cron import init_cron, drain_cron_notifications
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -86,6 +88,7 @@ SYSTEM = (
     "For complex sub-problems, use task to spawn a subagent. "
     "Before multi-step tasks, use todo_write to plan. "
     "Use task_create / task_list / task_update for persistent task tracking with dependencies. "
+    "For slow bash commands (install, build, test, deploy), set run_in_background=true to avoid blocking. "
     "Read files before editing — never guess content."
 )
 
@@ -255,22 +258,46 @@ def agent_loop(messages: list):
                     })
                     continue
 
-                handler = TOOL_HANDLERS.get(name)
-                output = handler(**args) if handler else f"Unknown tool: {name}"
+                # s15: 后台任务 — 慢命令走 daemon 线程，立即返回占位符
+                if should_run_background(name, args):
+                    bg_id = start_background_task(block["id"], name, args)
+                    cmd = args.get("command", name)
+                    placeholder = (
+                        f"[Background task {bg_id} started] "
+                        f"Command: {cmd}. "
+                        f"Result will be available when complete."
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": placeholder,
+                    })
+                    trigger_hooks("PostToolUse", block, placeholder)
+                else:
+                    handler = TOOL_HANDLERS.get(name)
+                    output = handler(**args) if handler else f"Unknown tool: {name}"
 
-                trigger_hooks("PostToolUse", block, output)
+                    trigger_hooks("PostToolUse", block, output)
+
+                    print(str(output)[:200])
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": output,
+                    })
 
                 # s05: 任务管理工具命中 → 重置 nag 计数器
                 if name in ("todo_write", "task_create", "task_update",
                             "schedule_cron", "cancel_cron"):
                     rounds_since_todo = 0
 
-                print(str(output)[:200])
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": output,
-                })
+        # s15: 注入已完成的后台任务通知（tool_result 块在前，text 块在后）
+        bg_notifications = collect_background_results()
+        if bg_notifications:
+            for notif in bg_notifications:
+                tool_results.append({"type": "text", "text": notif})
+            print(f"  \033[32m[inject] {len(bg_notifications)} background "
+                  f"notification(s)\033[0m")
 
         messages.append({"role": "user", "content": tool_results})
 
@@ -291,6 +318,13 @@ if __name__ == "__main__":
         if query.strip().lower() in ("q", "exit", ""):
             break
         trigger_hooks("UserPromptSubmit", query)
+
+        # s14: 注入 cron 子 agent 的完成通知
+        cron_notifs = drain_cron_notifications()
+        for notif in cron_notifs:
+            history.append({"role": "user", "content": notif})
+            print(f"\n  \033[35m[cron notify] injected result\033[0m")
+
         history.append({"role": "user", "content": query})
         agent_loop(history)
         # 打印模型的最终文本回复
