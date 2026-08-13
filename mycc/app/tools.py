@@ -16,7 +16,7 @@ import urllib.error
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from skill_loader import load_skill as _load_skill
+from skill_loader import load_skill as _load_skill, skill_manage
 from cron import run_schedule_cron, run_list_crons, run_cancel_cron, run_cron_results
 from message_bus import BUS
 from protocol import ProtocolState, pending_requests, new_request_id, match_response
@@ -857,6 +857,19 @@ TOOLS = [
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string", "description": "Skill name from the catalog"}},
                       "required": ["name"]}},
+
+    {"name": "skill_manage",
+     "description": "Create or update a Skill (self-evolution). action='create' to save a reusable method; action='update' to fix a deficient skill (rewrite via content, or fuzzy patch via old_string+new_string).",
+     "input_schema": {"type": "object",
+                      "properties": {
+                          "action": {"type": "string", "enum": ["create", "update"]},
+                          "name": {"type": "string", "description": "Skill name (lowercase, digits, - or _)"},
+                          "content": {"type": "string", "description": "Full skill body (create, or update rewrite)"},
+                          "description": {"type": "string", "description": "One-line description (create only)"},
+                          "category": {"type": "string", "description": "code | workflow | tooling | reference | other (optional)"},
+                          "old_string": {"type": "string", "description": "Text to replace (update patch mode)"},
+                          "new_string": {"type": "string", "description": "Replacement text (update patch mode)"}},
+                      "required": ["action", "name"]}},
 ]
 
 # ═══════════════════════════════════════════════════════════
@@ -891,4 +904,5 @@ TOOL_HANDLERS = {
     "request_plan": run_request_plan,
     "review_plan": run_review_plan,
     "load_skill": _load_skill,
+    "skill_manage": skill_manage,
 }
