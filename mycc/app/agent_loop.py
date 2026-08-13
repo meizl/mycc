@@ -34,6 +34,7 @@ from memory import build_memory_system, register_memory_hooks, load_memories, in
 from cron import init_cron, drain_cron_notifications
 from message_bus import BUS
 from teammate import spawn_teammate_async, active_teammates
+from mcp import assemble_tool_pool
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ SYSTEM = (
     "Before multi-step tasks, use todo_write to plan. "
     "Use task_create / task_list / task_update for persistent task tracking with dependencies. "
     "For slow bash commands (install, build, test, deploy), set run_in_background=true to avoid blocking. "
+    "Use connect_mcp to attach external tools (e.g. docs, deploy). MCP tools appear as mcp__server__tool after connecting. "
     "Read files before editing — never guess content."
 )
 
@@ -126,6 +128,8 @@ def agent_loop(messages: list):
     max_tokens = DEFAULT_MAX_TOKENS          # s11: 动态 max_tokens
     continuation_count = 0                    # s11: 续写次数
     state = RecoveryState(MODEL)              # s11: 恢复状态（529/模型切换）
+    # s19: 动态工具池 — 内置 + 已连接 MCP 工具。connect_mcp 后重建。
+    tools, handlers = assemble_tool_pool()
     while True:
         # s05: 3 轮没更新 todo → 注入提醒
         if rounds_since_todo >= 3 and messages:
@@ -148,7 +152,7 @@ def agent_loop(messages: list):
             try:
                 with client.messages.stream(
                     model=state.current_model, system=SYSTEM, messages=api_messages,
-                    tools=TOOLS, max_tokens=max_tokens,
+                    tools=tools, max_tokens=max_tokens,
                 ) as stream:
                     for event in stream:
                         if event.type == "content_block_start":
@@ -289,7 +293,7 @@ def agent_loop(messages: list):
                     })
                     trigger_hooks("PostToolUse", block, placeholder)
                 else:
-                    handler = TOOL_HANDLERS.get(name)
+                    handler = handlers.get(name)
                     output = handler(**args) if handler else f"Unknown tool: {name}"
 
                     trigger_hooks("PostToolUse", block, output)
@@ -305,6 +309,12 @@ def agent_loop(messages: list):
                 if name in ("todo_write", "task_create", "task_update",
                             "schedule_cron", "cancel_cron"):
                     rounds_since_todo = 0
+
+        # s19: connect_mcp 后工具池变化了，重建 tools/handlers
+        if any(b["type"] == "tool_use" and b["name"] == "connect_mcp"
+               for b in assistant_content):
+            tools, handlers = assemble_tool_pool()
+            print("  \033[31m[mcp] tool pool rebuilt\033[0m")
 
         # s15: 注入已完成的后台任务通知（tool_result 块在前，text 块在后）
         bg_notifications = collect_background_results()

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from skill_loader import load_skill as _load_skill, skill_manage
 from cron import run_schedule_cron, run_list_crons, run_cancel_cron, run_cron_results
+from mcp import connect_mcp
 from message_bus import BUS
 from protocol import ProtocolState, pending_requests, new_request_id, match_response
 
@@ -645,6 +646,13 @@ def run_review_plan(request_id: str, approve: bool,
     return f"Plan {'approved' if approve else 'rejected'} ({request_id})"
 
 
+# ── s19: MCP 工具 — 连接外部 server，动态发现工具 ──
+
+def run_connect_mcp(name: str) -> str:
+    """连接一个 MCP server（docs/deploy），发现其工具加入工具池。"""
+    return connect_mcp(name)
+
+
 # ═══════════════════════════════════════════════════════════
 #  工具定义
 # ═══════════════════════════════════════════════════════════
@@ -851,6 +859,13 @@ TOOLS = [
                           "feedback": {"type": "string"}},
                       "required": ["request_id", "approve"]}},
 
+    # ── MCP ──
+    {"name": "connect_mcp",
+     "description": "Connect to an MCP server (docs, deploy) and discover its tools. Discovered tools become available as mcp__server__tool.",
+     "input_schema": {"type": "object",
+                      "properties": {"name": {"type": "string"}},
+                      "required": ["name"]}},
+
     # ── 技能 ──
     {"name": "load_skill",
      "description": "Load the full content of a skill by name. Use when you need detailed instructions for a specific task type.",
@@ -905,4 +920,5 @@ TOOL_HANDLERS = {
     "review_plan": run_review_plan,
     "load_skill": _load_skill,
     "skill_manage": skill_manage,
+    "connect_mcp": run_connect_mcp,
 }
