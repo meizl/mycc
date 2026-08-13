@@ -35,6 +35,7 @@ from cron import init_cron, drain_cron_notifications
 from message_bus import BUS
 from teammate import spawn_teammate_async, active_teammates
 from mcp import assemble_tool_pool
+from prompt_injection import wrap_model_call
 
 # ── 初始化 ──────────────────────────────────────────────
 
@@ -44,6 +45,9 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
+
+# s20: 包装流式调用 — 注入前净化最后一条用户消息（prompt injection defense）
+stream_call = wrap_model_call(client.messages.stream)
 
 from error_recovery import (
     DEFAULT_MAX_TOKENS, ESCALATED_MAX_TOKENS, MAX_CONTINUATIONS, CONTINUATION_PROMPT,
@@ -150,7 +154,7 @@ def agent_loop(messages: list):
             stop_reason = None
 
             try:
-                with client.messages.stream(
+                with stream_call(
                     model=state.current_model, system=SYSTEM, messages=api_messages,
                     tools=tools, max_tokens=max_tokens,
                 ) as stream:
