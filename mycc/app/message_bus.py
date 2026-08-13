@@ -19,10 +19,10 @@ class MessageBus:
     Read is destructive: read_text + unlink (consumes messages)."""
 
     def send(self, from_agent: str, to_agent: str, content: str,
-             msg_type: str = "message"):
+             msg_type: str = "message", metadata: dict = None):
         msg = {"from": from_agent, "to": to_agent,
                "content": content, "type": msg_type,
-               "ts": time.time()}
+               "ts": time.time(), "metadata": metadata or {}}
         inbox = MAILBOX_DIR / f"{to_agent}.jsonl"
         with open(inbox, "a") as f:
             f.write(json.dumps(msg) + "\n")

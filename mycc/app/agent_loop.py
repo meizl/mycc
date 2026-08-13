@@ -96,8 +96,9 @@ SYSTEM = (
     "Use load_skill to get full details when needed. "
     "For complex sub-problems, use task to spawn a subagent (synchronous, waits for result). "
     "For parallel work, use spawn_teammate to send a task to a background teammate (asynchronous, result arrives via inbox). "
-    "Teammates run independently — you can continue working while they finish. "
+    "Teammates run independently and auto-claim unclaimed tasks — you can continue working while they finish. "
     "Use send_message to communicate with teammates, check_inbox to read their replies. "
+    "Use request_shutdown to stop a teammate, request_plan/review_plan to require and approve a teammate's plan before it acts. "
     "Before multi-step tasks, use todo_write to plan. "
     "Use task_create / task_list / task_update for persistent task tracking with dependencies. "
     "For slow bash commands (install, build, test, deploy), set run_in_background=true to avoid blocking. "
@@ -320,8 +321,9 @@ def _drain_inbox() -> str | None:
     """消费收件箱消息 + 后台任务结果，拼成一条 user message。
     返回 None 表示没有待处理的内容。"""
     parts = []
-    # teammate 消息
-    msgs = BUS.read_inbox("lead")
+    # teammate 消息（带协议路由）
+    from tools import consume_lead_inbox
+    msgs = consume_lead_inbox(route_protocol=True)
     if msgs:
         parts.append("[Inbox]\n" + "\n".join(
             f"From {m['from']}: {m['content'][:200]}" for m in msgs))

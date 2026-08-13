@@ -19,6 +19,7 @@ from pathlib import Path
 from skill_loader import load_skill as _load_skill
 from cron import run_schedule_cron, run_list_crons, run_cancel_cron, run_cron_results
 from message_bus import BUS
+from protocol import ProtocolState, pending_requests, new_request_id, match_response
 
 WORKDIR = Path.cwd()
 
@@ -375,6 +376,70 @@ def run_get_task(task_id: str) -> str:
         return f"Error: task {task_id} not found"
 
 
+# ── s17: 自治 worker 任务助手 — 扫描 + 认领 + 完成 ──
+
+def scan_unclaimed_tasks() -> list[dict]:
+    """找 pending、无 owner、依赖全部 done 的任务。"""
+    unclaimed = []
+    for f in sorted(TASKS_DIR.glob("task_*.json")):
+        try:
+            task = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (task.get("status") == "pending"
+                and not task.get("owner")
+                and can_start(task["id"])):
+            unclaimed.append(task)
+    return unclaimed
+
+
+def claim_task(task_id: str, owner: str = "agent") -> str:
+    """认领 pending 任务。设 owner + in_progress，写盘。"""
+    try:
+        task = load_task(task_id)
+    except FileNotFoundError:
+        return f"Error: task {task_id} not found"
+
+    if task.status != "pending":
+        return f"Task {task_id} is {task.status}, cannot claim"
+    if task.owner:
+        return f"Task {task_id} already owned by {task.owner}"
+    if not can_start(task_id):
+        blocked = [d for d in task.blockedBy
+                   if not _task_path(d).exists() or load_task(d).status != "done"]
+        return f"Error: {task_id} is blocked by: {blocked}"
+
+    task.owner = owner
+    task.status = "in_progress"
+    save_task(task)
+    print(f"  \033[36m[claim] {task.subject} → in_progress (owner: {owner})\033[0m")
+    return f"Claimed {task.id} ({task.subject})"
+
+
+def complete_task(task_id: str) -> str:
+    """完成 in_progress 任务。设 done + 释放 owner，报告解封的下游任务。"""
+    try:
+        task = load_task(task_id)
+    except FileNotFoundError:
+        return f"Error: task {task_id} not found"
+
+    if task.status != "in_progress":
+        return f"Task {task_id} is {task.status}, cannot complete"
+
+    task.status = "done"
+    task.owner = None
+    save_task(task)
+
+    unblocked = [t.subject for t in list_tasks_from_disk()
+                 if t.status == "pending" and t.blockedBy and can_start(t.id)]
+    print(f"  \033[32m[complete] {task.subject} ✓\033[0m")
+    msg = f"Completed {task.id} ({task.subject})"
+    if unblocked:
+        msg += f"\nUnblocked: {', '.join(unblocked)}"
+        print(f"  \033[33m[unblocked] {', '.join(unblocked)}\033[0m")
+    return msg
+
+
 # ── s05: todo_write — 批量规划步骤 ──
 
 def _normalize_todos(todos):
@@ -514,14 +579,70 @@ def run_send_message(to: str, content: str) -> str:
 
 
 def run_check_inbox() -> str:
-    """查看 Lead 的收件箱。消费性读取。"""
-    msgs = BUS.read_inbox("lead")
+    """查看 Lead 的收件箱。消费性读取 + 路由协议响应。"""
+    msgs = consume_lead_inbox(route_protocol=True)
     if not msgs:
         return "(inbox empty)"
     lines = []
     for m in msgs:
-        lines.append(f"  [{m['from']}] {m['content'][:200]}")
+        meta = m.get("metadata", {})
+        req_id = meta.get("request_id", "")
+        tag = f" [{m['type']} req:{req_id}]" if req_id else f" [{m['type']}]"
+        lines.append(f"  [{m['from']}]{tag} {m['content'][:200]}")
     return "\n".join(lines)
+
+
+def consume_lead_inbox(route_protocol: bool = True) -> list[dict]:
+    """读 Lead 收件箱：路由协议响应，返回全部消息。"""
+    msgs = BUS.read_inbox("lead")
+    if route_protocol:
+        for msg in msgs:
+            meta = msg.get("metadata", {})
+            req_id = meta.get("request_id", "")
+            msg_type = msg.get("type", "")
+            if req_id and msg_type.endswith("_response"):
+                match_response(msg_type, req_id, meta.get("approve", False))
+    return msgs
+
+
+# ── s16: 协议工具 — shutdown / plan 审批 ──
+
+def run_request_shutdown(teammate: str) -> str:
+    """要求 teammate 优雅退出。"""
+    req_id = new_request_id()
+    pending_requests[req_id] = ProtocolState(
+        request_id=req_id, type="shutdown",
+        sender="lead", target=teammate,
+        status="pending", payload="")
+    BUS.send("lead", teammate, "Please shut down gracefully.",
+             "shutdown_request", {"request_id": req_id})
+    print(f"  \033[35m[protocol] shutdown_request → {teammate} "
+          f"({req_id})\033[0m")
+    return f"Shutdown request sent to {teammate} (req: {req_id})"
+
+
+def run_request_plan(teammate: str, task: str) -> str:
+    """要求 teammate 提交一个计划。"""
+    BUS.send("lead", teammate, f"Please submit a plan for: {task}", "message")
+    return f"Asked {teammate} to submit a plan"
+
+
+def run_review_plan(request_id: str, approve: bool,
+                    feedback: str = "") -> str:
+    """批准或拒绝一个已提交的计划。"""
+    state = pending_requests.get(request_id)
+    if not state:
+        return f"Request {request_id} not found"
+    if state.status != "pending":
+        return f"Request {request_id} already {state.status}"
+    state.status = "approved" if approve else "rejected"
+    BUS.send("lead", state.sender,
+             feedback or ("Approved" if approve else "Rejected"),
+             "plan_approval_response",
+             {"request_id": request_id, "approve": approve})
+    icon = "✓" if approve else "✗"
+    print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
+    return f"Plan {'approved' if approve else 'rejected'} ({request_id})"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -708,6 +829,28 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {},
                       "required": []}},
 
+    {"name": "request_shutdown",
+     "description": "Request a teammate to shut down gracefully.",
+     "input_schema": {"type": "object",
+                      "properties": {"teammate": {"type": "string"}},
+                      "required": ["teammate"]}},
+
+    {"name": "request_plan",
+     "description": "Ask a teammate to submit a plan for review.",
+     "input_schema": {"type": "object",
+                      "properties": {"teammate": {"type": "string"},
+                                     "task": {"type": "string"}},
+                      "required": ["teammate", "task"]}},
+
+    {"name": "review_plan",
+     "description": "Approve or reject a submitted plan by request_id.",
+     "input_schema": {"type": "object",
+                      "properties": {
+                          "request_id": {"type": "string"},
+                          "approve": {"type": "boolean"},
+                          "feedback": {"type": "string"}},
+                      "required": ["request_id", "approve"]}},
+
     # ── 技能 ──
     {"name": "load_skill",
      "description": "Load the full content of a skill by name. Use when you need detailed instructions for a specific task type.",
@@ -744,5 +887,8 @@ TOOL_HANDLERS = {
     "spawn_teammate": run_spawn_teammate,
     "send_message": run_send_message,
     "check_inbox": run_check_inbox,
+    "request_shutdown": run_request_shutdown,
+    "request_plan": run_request_plan,
+    "review_plan": run_review_plan,
     "load_skill": _load_skill,
 }
