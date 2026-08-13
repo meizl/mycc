@@ -298,7 +298,14 @@ def agent_loop(messages: list):
                     trigger_hooks("PostToolUse", block, placeholder)
                 else:
                     handler = handlers.get(name)
-                    output = handler(**args) if handler else f"Unknown tool: {name}"
+                    if not handler:
+                        output = f"Unknown tool: {name}"
+                    else:
+                        try:
+                            output = handler(**args)
+                        except Exception as e:
+                            # s20: 兜底 — 异常转成诚实的错误字符串，不崩溃
+                            output = f"Error: {type(e).__name__}: {e}"
 
                     trigger_hooks("PostToolUse", block, output)
 

@@ -110,7 +110,13 @@ def spawn_subagent(client, model: str, description: str) -> str:
                 continue
 
             handler = SUB_HANDLERS.get(block.name)
-            output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            if not handler:
+                output = f"Unknown: {block.name}"
+            else:
+                try:
+                    output = handler(**block.input)
+                except Exception as e:
+                    output = f"Error: {type(e).__name__}: {e}"
             trigger_hooks("PostToolUse", block, output)
             print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
             results.append({

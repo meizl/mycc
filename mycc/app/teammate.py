@@ -204,7 +204,13 @@ def spawn_teammate_async(name: str, role: str, prompt: str,
                 for block in response.content:
                     if block.type == "tool_use":
                         handler = sub_handlers.get(block.name)
-                        output = handler(**block.input) if handler else "Unknown"
+                        if not handler:
+                            output = "Unknown"
+                        else:
+                            try:
+                                output = handler(**block.input)
+                            except Exception as e:
+                                output = f"Error: {type(e).__name__}: {e}"
                         print(f"  \033[90m[teammate:{name}] {block.name}: "
                               f"{str(output)[:80]}\033[0m")
                         results.append({"type": "tool_result",
